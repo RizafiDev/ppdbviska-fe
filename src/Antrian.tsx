@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import { pngBase64ToEscposRaster } from './utils/escposImage';
-
 
 interface Queue {
   id: number;
@@ -27,93 +26,113 @@ const Antrian = () => {
   const [queues, setQueues] = useState<Queue[]>([]);
   const [queueNumbers, setQueueNumbers] = useState<QueueNumber[]>([]);
   const [loading, setLoading] = useState(false);
-  const [, setPrintStatus] = useState<string>('');
   const [isPrinting, setIsPrinting] = useState(false);
   const [countdowns, setCountdowns] = useState<{[key: number]: number}>({});
-  
-  // State untuk mengontrol auto refresh
   const [refreshInterval, setRefreshInterval] = useState<number | null>(null);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  const [currentDateTime, setCurrentDateTime] = useState({
+    date: '',
+    time: ''
+  });
 
-  // Fungsi untuk fetch data
-  const fetchData = async () => {
+  // Memoize API endpoints
+  const API_ENDPOINTS = useMemo(() => ({
+    queues: 'http://127.0.0.1:8000/api/admin/queues',
+    queueNumbers: 'http://127.0.0.1:8000/api/admin/queue-numbers'
+  }), []);
+
+  // Update date and time every second
+  useEffect(() => {
+    const updateDateTime = () => {
+      const now = new Date();
+      setCurrentDateTime({
+        date: now.toLocaleDateString('id-ID', {
+          weekday: 'long',
+          day: '2-digit',
+          month: 'long',
+          year: 'numeric'
+        }),
+        time: now.toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })
+      });
+    };
+
+    updateDateTime();
+    const timer = setInterval(updateDateTime, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Memoized fetch data function
+  const fetchData = useCallback(async () => {
     try {
       const [queueRes, queueNumberRes] = await Promise.all([
-        axios.get('http://127.0.0.1:8000/api/admin/queues'),
-        axios.get('http://127.0.0.1:8000/api/admin/queue-numbers'),
+        axios.get(API_ENDPOINTS.queues),
+        axios.get(API_ENDPOINTS.queueNumbers),
       ]);
 
       setQueues(queueRes.data.data.filter((q: Queue) => q.status === 'melayani'));
       setQueueNumbers(queueNumberRes.data.data);
     } catch (error) {
       console.error('Error fetching data:', error);
-      // Tidak menampilkan alert untuk auto refresh agar tidak mengganggu
       if (!isProcessingQueue) {
         console.log('Gagal memuat data antrian saat auto refresh');
       }
     }
-  };
+  }, [API_ENDPOINTS, isProcessingQueue]);
 
   // Setup auto refresh
-  const setupAutoRefresh = () => {
-    // Clear existing interval jika ada
+  const setupAutoRefresh = useCallback(() => {
     if (refreshInterval) {
       clearInterval(refreshInterval);
     }
 
-    // Setup interval baru
     const interval = setInterval(() => {
-      // Hanya refresh jika tidak sedang memproses antrian atau print
       if (!isProcessingQueue && !isPrinting && Object.keys(countdowns).length === 0) {
         console.log('Auto refreshing data...');
         fetchData();
       }
-    }, 10000); // 10 detik
+    }, 10000);
 
     setRefreshInterval(interval);
-  };
+  }, [fetchData, isProcessingQueue, isPrinting, countdowns, refreshInterval]);
 
   // Pause auto refresh
-  const pauseAutoRefresh = () => {
+  const pauseAutoRefresh = useCallback(() => {
     if (refreshInterval) {
       clearInterval(refreshInterval);
       setRefreshInterval(null);
     }
-  };
+  }, [refreshInterval]);
 
   // Resume auto refresh
-  const resumeAutoRefresh = () => {
+  const resumeAutoRefresh = useCallback(() => {
     setupAutoRefresh();
-  };
+  }, [setupAutoRefresh]);
 
   useEffect(() => {
-    // Initial data fetch
     fetchData();
-    
-    // Setup auto refresh
     setupAutoRefresh();
 
-    // Cleanup on unmount
     return () => {
       if (refreshInterval) {
         clearInterval(refreshInterval);
       }
     };
-  }, []); // Empty dependency array untuk initial setup
+  }, []);
 
-  // Effect untuk mengontrol auto refresh berdasarkan state processing
   useEffect(() => {
     if (isProcessingQueue || isPrinting || Object.keys(countdowns).length > 0) {
-      // Pause auto refresh saat ada proses
       pauseAutoRefresh();
     } else {
-      // Resume auto refresh saat tidak ada proses
       resumeAutoRefresh();
     }
-  }, [isProcessingQueue, isPrinting, countdowns]);
+  }, [isProcessingQueue, isPrinting, countdowns, pauseAutoRefresh, resumeAutoRefresh]);
 
   useEffect(() => {
-    // Handle countdowns
     const timers: ReturnType<typeof setTimeout>[] = [];
     
     Object.keys(countdowns).forEach(queueId => {
@@ -127,7 +146,6 @@ const Antrian = () => {
         }, 1000);
         timers.push(timer);
       } else if (countdowns[id] === 0) {
-        // Countdown finished, process the queue
         const queue = queues.find(q => q.id === id);
         if (queue) {
           processQueue(queue);
@@ -145,15 +163,15 @@ const Antrian = () => {
     };
   }, [countdowns, queues]);
 
-  const getCurrentQueue = (queueId: number) => {
+  const getCurrentQueue = useCallback((queueId: number) => {
     const calledQueues = queueNumbers
       .filter((q) => q.queue_id === queueId && q.status === 'dipanggil' && q.called_at)
       .sort((a, b) => new Date(b.called_at!).getTime() - new Date(a.called_at!).getTime());
 
-    return calledQueues[0]; // Ambil yang terbaru
-  };
+    return calledQueues[0];
+  }, [queueNumbers]);
 
-  const getLastCreatedQueue = (queueId: number) => {
+  const getLastCreatedQueue = useCallback((queueId: number) => {
     const allQueueNumbers = queueNumbers.filter((q) => q.queue_id === queueId);
     
     const sorted = allQueueNumbers.sort((a, b) => {
@@ -164,23 +182,19 @@ const Antrian = () => {
     });
 
     return sorted[0];
-  };
+  }, [queueNumbers]);
 
-  const getSisaAntrian = (queueId: number) => {
-    const allQueueNumbers = queueNumbers.filter((q) => q.queue_id === queueId);
-    const waitingQueueCount = allQueueNumbers.filter(
-      (q) => q.status === 'menunggu'
+  const getSisaAntrian = useCallback((queueId: number) => {
+    return queueNumbers.filter(
+      (q) => q.queue_id === queueId && q.status === 'menunggu'
     ).length;
+  }, [queueNumbers]);
 
-    return waitingQueueCount;
-  };
-
-  const printQueueTicket = async (queueNumber: string, queueName: string, qrBase64?: string) => {
+  const printQueueTicket = useCallback(async (queueNumber: string, queueName: string, qrBase64?: string) => {
     if (isPrinting) return;
 
     try {
       setIsPrinting(true);
-      setPrintStatus('Connecting to printer...');
 
       const ports = await (navigator as any).serial.getPorts();
       let port: any = null;
@@ -194,7 +208,6 @@ const Antrian = () => {
             info.usbProductId === savedPortInfo.usbProductId
           ) {
             port = availablePort;
-            setPrintStatus('Found previously used printer. Connecting...');
             break;
           }
         }
@@ -202,7 +215,6 @@ const Antrian = () => {
 
       if (!port) {
         try {
-          setPrintStatus('Please select your printer port...');
           port = await (navigator as any).serial.requestPort();
           const info = await port.getInfo();
 
@@ -211,16 +223,12 @@ const Antrian = () => {
             usbProductId: info.usbProductId
           }));
         } catch (e) {
-          setPrintStatus('Port selection was cancelled.');
           setIsPrinting(false);
           return;
         }
       }
 
-      setPrintStatus('Opening connection to printer...');
       await port.open({ baudRate: 9600 });
-      setPrintStatus('Connected to printer. Preparing to send data...');
-
       const writer = port.writable.getWriter();
       const encoder = new TextEncoder();
 
@@ -241,100 +249,82 @@ const Antrian = () => {
       });
 
       const commands = [
-  ESC + '@',
-  ESC + 'a' + '\x01',
-  ESC + 'E' + '\x01',
-  ESC + '!' + '\x10',
-  'SMKN 6 SURAKARTA\n',
-  ESC + '!' + '\x00',
-  'Antrian SPMB 2025\n',
-  ESC + '!' + '\x00',
-  ESC + 'E' + '\x00',
-  '\n',
-  ESC + 'a' + '\x00',
-  ESC + 'E' + '\x01',
-  `Tanggal : ${dateStr}\n`,
-  `Waktu   : ${timeStr}\n`,
-  `Tempat Layanan: ${queueName}\n`,
-  '\n',
-  ESC + '!' + '\x00',
-  ESC + 'E' + '\x00',
-  ESC + 'a' + '\x01',
-  ESC + 'E' + '\x01',
-  ESC + '!' + '\x30',
-  `${queueNumber}\n`,
-  ESC + '!' + '\x00',
-  ESC + 'E' + '\x00',
-  '\n',
-  ESC + 'a' + '\x01',
-  ESC + 'E' + '\x01',
-  'Silakan tunggu hingga\n',
-  'nomor Anda dipanggil\n',
-  '\n',
-  'Terima kasih atas\nkepercayaan anda\n',
-  '\n',
-  'Follow Us @smkn6solo\n',
-  '\n' // kurangi newline di sini (misalnya hanya 2 baris)
-];
+        ESC + '@',
+        ESC + 'a' + '\x01',
+        ESC + 'E' + '\x01',
+        ESC + '!' + '\x10',
+        'SMKN 6 SURAKARTA\n',
+        ESC + '!' + '\x00',
+        'Antrian SPMB 2025\n',
+        ESC + '!' + '\x00',
+        ESC + 'E' + '\x00',
+        '\n',
+        ESC + 'a' + '\x00',
+        ESC + 'E' + '\x01',
+        `Tanggal : ${dateStr}\n`,
+        `Waktu   : ${timeStr}\n`,
+        `Tempat Layanan: ${queueName}\n`,
+        '\n',
+        ESC + '!' + '\x00',
+        ESC + 'E' + '\x00',
+        ESC + 'a' + '\x01',
+        ESC + 'E' + '\x01',
+        ESC + '!' + '\x30',
+        `${queueNumber}\n`,
+        ESC + '!' + '\x00',
+        ESC + 'E' + '\x00',
+        '\n',
+        ESC + 'a' + '\x01',
+        ESC + 'E' + '\x01',
+        'Silakan tunggu hingga\n',
+        'nomor Anda dipanggil\n',
+        '\n',
+        'Terima kasih atas\nkepercayaan anda\n',
+        '\n',
+        'Follow Us @smkn6solo\n',
+        '\n'
+      ];
 
-setPrintStatus('Sending data to printer...');
-const fullCommandBuffer = encoder.encode(commands.join(''));
-await writer.write(fullCommandBuffer);
+      const fullCommandBuffer = encoder.encode(commands.join(''));
+      await writer.write(fullCommandBuffer);
 
-// Cetak QR Code jika ada
-if (qrBase64) {
-  setPrintStatus('Printing QR code...');
-  const qrRaster = await pngBase64ToEscposRaster(qrBase64);
-  await writer.write(qrRaster);
-  await writer.write(encoder.encode('\n')); // beri jarak agar tidak terpotong
-  await writer.write(encoder.encode('SCAN QR UNTUK')); // beri jarak agar tidak terpotong
-   await writer.write(encoder.encode('\n'));
-  await writer.write(encoder.encode('CEK STATUS ANTRIAN')); // beri jarak agar tidak terpotong
-  await writer.write(encoder.encode('\n\n\n\n')); // beri jarak agar tidak terpotong
-}
+      if (qrBase64) {
+        const qrRaster = await pngBase64ToEscposRaster(qrBase64);
+        await writer.write(qrRaster);
+        await writer.write(encoder.encode('\n'));
+        await writer.write(encoder.encode('SCAN QR UNTUK'));
+        await writer.write(encoder.encode('\n'));
+        await writer.write(encoder.encode('CEK STATUS ANTRIAN'));
+        await writer.write(encoder.encode('\n\n\n\n'));
+      }
 
-// Baru setelah semua selesai, lakukan potong kertas
-await writer.write(encoder.encode(GS + 'V' + '\x00'));
-
-      setPrintStatus('Data sent. Finalizing print job...');
-
+      await writer.write(encoder.encode(GS + 'V' + '\x00'));
       writer.releaseLock();
       await new Promise(resolve => setTimeout(resolve, 1000));
       await port.close();
-
-      setPrintStatus('Tiket antrian berhasil dicetak!');
     } catch (err) {
       console.error('Printer Error:', err);
-      setPrintStatus(`Print error: ${(err as Error).message || 'Unknown error'}`);
+      toast.error(`Gagal mencetak: ${(err as Error).message || 'Unknown error'}`, {
+        position: "top-right",
+        autoClose: 5000,
+      });
     } finally {
       setIsPrinting(false);
     }
-  };
+  }, [isPrinting]);
 
-  const processQueue = async (queue: Queue) => {
+  const processQueue = useCallback(async (queue: Queue) => {
     if (loading) return;
 
     setLoading(true);
-    setIsProcessingQueue(true); // Set flag processing
+    setIsProcessingQueue(true);
 
     try {
-      // Hitung total semua antrian untuk queue ini
       const allQueueNumbers = queueNumbers.filter(q => q.queue_id === queue.id);
       const nextNumber = allQueueNumbers.length + 1;
-
-      // Generate prefix dari nama queue
       const queuePrefix = queue.name.replace(/\s+/g, '').toUpperCase();
-
-      // Generate antrian number dengan format: NAMAQUEUE-001
       const newQueueNumber = `${queuePrefix}-${String(nextNumber).padStart(3, '0')}`;
 
-      console.log('Creating queue number:', {
-        queue_id: queue.id,
-        queue_number: newQueueNumber,
-        existing_count: allQueueNumbers.length
-      });
-
-      // Data yang akan dikirim ke API
       const data = {
         queue_id: queue.id,
         queue_number: newQueueNumber,
@@ -343,7 +333,6 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
         finished_at: null,
       };
 
-      // Set headers untuk API request
       const config = {
         headers: {
           'Content-Type': 'application/json',
@@ -351,17 +340,13 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
         }
       };
 
-      // Kirim data ke API
       const response = await axios.post(
         'http://127.0.0.1:8000/api/admin/queue-numbers',
         data,
         config
       );
 
-      console.log('API Response:', response.data);
-
       if (response.data.success || response.status === 200 || response.status === 201) {
-        // Ambil qr_code.base64 dari response
         const qrBase64 = response.data.data?.qr_code?.base64;
         await printQueueTicket(newQueueNumber, queue.name, qrBase64);
 
@@ -370,19 +355,15 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
           autoClose: 5000,
         });
 
-        // Refresh data setelah berhasil create
-        const queueNumberRes = await axios.get('http://127.0.0.1:8000/api/admin/queue-numbers');
+        const queueNumberRes = await axios.get(API_ENDPOINTS.queueNumbers);
         setQueueNumbers(queueNumberRes.data.data);
       } else {
-        console.error('API returned unsuccessful response:', response.data);
         toast.error('Gagal membuat antrian: ' + (response.data.message || 'Unknown error'), {
           position: "top-right",
           autoClose: 5000,
         });
       }
     } catch (error) {
-      console.error('Error creating queue:', error);
-
       if (axios.isAxiosError(error)) {
         if (error.response) {
           const errorMessage = error.response.data.message ||
@@ -411,20 +392,18 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
       }
     } finally {
       setLoading(false);
-      setIsProcessingQueue(false); // Reset flag processing
+      setIsProcessingQueue(false);
     }
-  };
+  }, [loading, queueNumbers, printQueueTicket, API_ENDPOINTS.queueNumbers]);
 
-  const handleCardClick = (queue: Queue) => {
+  const handleCardClick = useCallback((queue: Queue) => {
     if (loading) return;
 
-    // Start countdown for this queue
     setCountdowns(prev => ({
       ...prev,
-      [queue.id]: 3 // 3 seconds countdown
+      [queue.id]: 3
     }));
 
-    // Show toast with countdown
     const toastId = toast.info(
       <div>
         <div>Antrian untuk {queue.name} akan diproses dalam...</div>
@@ -432,7 +411,6 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
         <button 
           className="mt-2 px-4 py-1 bg-red-500 text-white rounded hover:bg-red-600"
           onClick={() => {
-            // Cancel the countdown
             setCountdowns(prev => {
               const newCountdowns = {...prev};
               delete newCountdowns[queue.id];
@@ -457,7 +435,6 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
       }
     );
 
-    // Update the countdown in the toast
     let count = 3;
     const interval = setInterval(() => {
       count--;
@@ -492,17 +469,25 @@ await writer.write(encoder.encode(GS + 'V' + '\x00'));
         toast.dismiss(toastId);
       }
     }, 1000);
-  };
+  }, [loading]);
 
   return (
     <div className="container px-12 flex py-10 w-full">
       <div className="filament-widgets-widget w-full">
         <section className="filament-section w-full">
           <div className="pb-2 pt-4 px-6 flex flex-col items-start gap-2">
-            <h2 className="text-4xl font-bold text-[#f39e0e]">
-              SMK Negeri 6 Surakarta
-            </h2>
-            <p className='text-gray-200 font-medium text-lg'>Antrian Sistem Penerimaan Murid Baru 2025</p>
+            <div className="w-full flex justify-between items-center">
+              <div>
+                <h2 className="text-4xl font-bold text-[#f39e0e]">
+                  SMK Negeri 6 Surakarta
+                </h2>
+                <p className='text-gray-200 font-medium text-lg'>Antrian Sistem Penerimaan Murid Baru 2025</p>
+              </div>
+              <div className="text-right">
+                <p className="text-gray-200 font-medium">{currentDateTime.date}</p>
+                <p className="text-gray-200 font-medium">{currentDateTime.time}</p>
+              </div>
+            </div>
             {/* Indicator auto refresh status */}
             <div className="flex items-center gap-2 text-sm text-gray-400">
               <div className={`w-2 h-2 rounded-full ${
