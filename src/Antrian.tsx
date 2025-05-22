@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import axios from 'axios';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
+import { pngBase64ToEscposRaster } from './utils/escposImage';
+
 
 interface Queue {
   id: number;
@@ -28,25 +30,87 @@ const Antrian = () => {
   const [, setPrintStatus] = useState<string>('');
   const [isPrinting, setIsPrinting] = useState(false);
   const [countdowns, setCountdowns] = useState<{[key: number]: number}>({});
+  
+  // State untuk mengontrol auto refresh
+  const [refreshInterval, setRefreshInterval] = useState<number | null>(null);
+  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+
+  // Fungsi untuk fetch data
+  const fetchData = async () => {
+    try {
+      const [queueRes, queueNumberRes] = await Promise.all([
+        axios.get('http://127.0.0.1:8000/api/admin/queues'),
+        axios.get('http://127.0.0.1:8000/api/admin/queue-numbers'),
+      ]);
+
+      setQueues(queueRes.data.data.filter((q: Queue) => q.status === 'melayani'));
+      setQueueNumbers(queueNumberRes.data.data);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+      // Tidak menampilkan alert untuk auto refresh agar tidak mengganggu
+      if (!isProcessingQueue) {
+        console.log('Gagal memuat data antrian saat auto refresh');
+      }
+    }
+  };
+
+  // Setup auto refresh
+  const setupAutoRefresh = () => {
+    // Clear existing interval jika ada
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+    }
+
+    // Setup interval baru
+    const interval = setInterval(() => {
+      // Hanya refresh jika tidak sedang memproses antrian atau print
+      if (!isProcessingQueue && !isPrinting && Object.keys(countdowns).length === 0) {
+        console.log('Auto refreshing data...');
+        fetchData();
+      }
+    }, 10000); // 10 detik
+
+    setRefreshInterval(interval);
+  };
+
+  // Pause auto refresh
+  const pauseAutoRefresh = () => {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      setRefreshInterval(null);
+    }
+  };
+
+  // Resume auto refresh
+  const resumeAutoRefresh = () => {
+    setupAutoRefresh();
+  };
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [queueRes, queueNumberRes] = await Promise.all([
-          axios.get('http://127.0.0.1:8000/api/admin/queues'),
-          axios.get('http://127.0.0.1:8000/api/admin/queue-numbers'),
-        ]);
+    // Initial data fetch
+    fetchData();
+    
+    // Setup auto refresh
+    setupAutoRefresh();
 
-        setQueues(queueRes.data.data.filter((q: Queue) => q.status === 'melayani'));
-        setQueueNumbers(queueNumberRes.data.data);
-      } catch (error) {
-        console.error('Error fetching data:', error);
-        alert('Gagal memuat data antrian');
+    // Cleanup on unmount
+    return () => {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
       }
     };
+  }, []); // Empty dependency array untuk initial setup
 
-    fetchData();
-  }, []);
+  // Effect untuk mengontrol auto refresh berdasarkan state processing
+  useEffect(() => {
+    if (isProcessingQueue || isPrinting || Object.keys(countdowns).length > 0) {
+      // Pause auto refresh saat ada proses
+      pauseAutoRefresh();
+    } else {
+      // Resume auto refresh saat tidak ada proses
+      resumeAutoRefresh();
+    }
+  }, [isProcessingQueue, isPrinting, countdowns]);
 
   useEffect(() => {
     // Handle countdowns
@@ -89,9 +153,6 @@ const Antrian = () => {
     return calledQueues[0]; // Ambil yang terbaru
   };
 
-  const getWaitingQueues = (queueId: number) =>
-    queueNumbers.filter((q) => q.queue_id === queueId && q.status === 'menunggu');
-
   const getLastCreatedQueue = (queueId: number) => {
     const allQueueNumbers = queueNumbers.filter((q) => q.queue_id === queueId);
     
@@ -114,7 +175,7 @@ const Antrian = () => {
     return waitingQueueCount;
   };
 
-  const printQueueTicket = async (queueNumber: string, queueName: string) => {
+  const printQueueTicket = async (queueNumber: string, queueName: string, qrBase64?: string) => {
     if (isPrinting) return;
 
     try {
@@ -180,47 +241,60 @@ const Antrian = () => {
       });
 
       const commands = [
-        ESC + '@',
-        ESC + 'a' + '\x01',
-        ESC + 'E' + '\x01',
-        ESC + '!' + '\x10',
-        'SMKN 6 SURAKARTA\n',
-        ESC + '!' + '\x00',
-        'Antrian SPMB 2025\n',
-        ESC + '!' + '\x00',
-        ESC + 'E' + '\x00',
-        '\n',
-        ESC + 'a' + '\x00',
-        ESC + 'E' + '\x01',
-        `Tanggal : ${dateStr}\n`,
-        `Waktu   : ${timeStr}\n`,
-        `Tempat Layanan: ${queueName}\n`,
-        '\n',
-        ESC + '!' + '\x00',
-        ESC + 'E' + '\x00',
-        ESC + 'a' + '\x01',
-        ESC + 'E' + '\x01',
-        ESC + '!' + '\x30',
-        `${queueNumber}\n`,
-        ESC + '!' + '\x00',
-        ESC + 'E' + '\x00',
-        '\n',
-        ESC + 'a' + '\x01',
-        ESC + 'E' + '\x01',
-        'Silakan tunggu hingga\n',
-        'nomor Anda dipanggil\n',
-        '\n',
-        'Terima kasih atas\nkepercayaan anda',
-        '\n',
-        'Follow Us @smkn6solo\n',
-        '\n\n\n',
-        GS + 'V' + '\x00'
-      ];
+  ESC + '@',
+  ESC + 'a' + '\x01',
+  ESC + 'E' + '\x01',
+  ESC + '!' + '\x10',
+  'SMKN 6 SURAKARTA\n',
+  ESC + '!' + '\x00',
+  'Antrian SPMB 2025\n',
+  ESC + '!' + '\x00',
+  ESC + 'E' + '\x00',
+  '\n',
+  ESC + 'a' + '\x00',
+  ESC + 'E' + '\x01',
+  `Tanggal : ${dateStr}\n`,
+  `Waktu   : ${timeStr}\n`,
+  `Tempat Layanan: ${queueName}\n`,
+  '\n',
+  ESC + '!' + '\x00',
+  ESC + 'E' + '\x00',
+  ESC + 'a' + '\x01',
+  ESC + 'E' + '\x01',
+  ESC + '!' + '\x30',
+  `${queueNumber}\n`,
+  ESC + '!' + '\x00',
+  ESC + 'E' + '\x00',
+  '\n',
+  ESC + 'a' + '\x01',
+  ESC + 'E' + '\x01',
+  'Silakan tunggu hingga\n',
+  'nomor Anda dipanggil\n',
+  '\n',
+  'Terima kasih atas\nkepercayaan anda\n',
+  '\n',
+  'Follow Us @smkn6solo\n',
+  '\n' // kurangi newline di sini (misalnya hanya 2 baris)
+];
 
-      setPrintStatus('Sending data to printer...');
+setPrintStatus('Sending data to printer...');
+const fullCommandBuffer = encoder.encode(commands.join(''));
+await writer.write(fullCommandBuffer);
 
-      const fullCommandBuffer = encoder.encode(commands.join(''));
-      await writer.write(fullCommandBuffer);
+// Cetak QR Code jika ada
+if (qrBase64) {
+  setPrintStatus('Printing QR code...');
+  const qrRaster = await pngBase64ToEscposRaster(qrBase64);
+  await writer.write(qrRaster);
+  await writer.write(encoder.encode('\n')); // beri jarak agar tidak terpotong
+  await writer.write(encoder.encode('SCAN QR UNTUK')); // beri jarak agar tidak terpotong
+   await writer.write(encoder.encode('\n'));
+  await writer.write(encoder.encode('CEK STATUS ANTRIAN')); // beri jarak agar tidak terpotong
+  await writer.write(encoder.encode('\n\n\n\n')); // beri jarak agar tidak terpotong
+}
+
+// Baru setelah semua selesai, lakukan potong kertas
+await writer.write(encoder.encode(GS + 'V' + '\x00'));
 
       setPrintStatus('Data sent. Finalizing print job...');
 
@@ -241,6 +315,7 @@ const Antrian = () => {
     if (loading) return;
 
     setLoading(true);
+    setIsProcessingQueue(true); // Set flag processing
 
     try {
       // Hitung total semua antrian untuk queue ini
@@ -286,8 +361,9 @@ const Antrian = () => {
       console.log('API Response:', response.data);
 
       if (response.data.success || response.status === 200 || response.status === 201) {
-        // Cetak tiket
-        await printQueueTicket(newQueueNumber, queue.name);
+        // Ambil qr_code.base64 dari response
+        const qrBase64 = response.data.data?.qr_code?.base64;
+        await printQueueTicket(newQueueNumber, queue.name, qrBase64);
 
         toast.success(`Antrian ${newQueueNumber} berhasil dibuat!`, {
           position: "top-right",
@@ -335,6 +411,7 @@ const Antrian = () => {
       }
     } finally {
       setLoading(false);
+      setIsProcessingQueue(false); // Reset flag processing
     }
   };
 
@@ -426,6 +503,19 @@ const Antrian = () => {
               SMK Negeri 6 Surakarta
             </h2>
             <p className='text-gray-200 font-medium text-lg'>Antrian Sistem Penerimaan Murid Baru 2025</p>
+            {/* Indicator auto refresh status */}
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <div className={`w-2 h-2 rounded-full ${
+                isProcessingQueue || isPrinting || Object.keys(countdowns).length > 0 
+                  ? 'bg-yellow-500' 
+                  : 'bg-green-500'
+              }`}></div>
+              <span>
+                {isProcessingQueue || isPrinting || Object.keys(countdowns).length > 0 
+                  ? 'Auto refresh ditunda' 
+                  : 'Auto refresh aktif (10s)'}
+              </span>
+            </div>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6 px-6 pb-6 pt-6 w-full">
